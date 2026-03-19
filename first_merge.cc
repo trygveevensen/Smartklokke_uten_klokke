@@ -4,17 +4,18 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
+// --- KONFIGURASJON ---
 const char* ssid      = "Nokia";
 const char* password  = "noob1234";
 const char* serverUrl = "http://172.20.10.14:5000/upload";
 
-// I/O pins
+// --- PIN DEFINISJONER ---
 const int MOTOR_VENSTRE = 12; 
-const int MOTOR_MIDT    = 13;
+const int MOTOR_MIDT    = 13; 
 const int MOTOR_HOYRE   = 2;  
-const int BUTTON_PIN    = 4;  // Knappen på blits-pinnen
+const int BUTTON_PIN    = 4;  
 
-// Kamera Pins
+// Kamera Pins (Standard AI-Thinker)
 #define PWDN_GPIO_NUM  32
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM   0
@@ -32,10 +33,11 @@ const int BUTTON_PIN    = 4;  // Knappen på blits-pinnen
 #define HREF_GPIO_NUM  23
 #define PCLK_GPIO_NUM  22
 
-// Global:
+// --- GLOBALE VARIABLER ---
 SparkFun_VL53L5CX myImager;
 VL53L5CX_ResultsData measurementData;
 bool isUploading = false; 
+bool wifiEnabled = false; // Blir true bare hvis WiFi kobler seg til
 
 const int MIN_DIST = 300;
 const int MAX_DIST = 1000;
@@ -67,16 +69,17 @@ void initCamera() {
   config.jpeg_quality = 12;
   config.fb_count     = 1;
 
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("Kamera feilet!");
-    while (true) delay(1000);
+  if (esp_camera_init(&config) == ESP_OK) {
+    Serial.println("Kamera klart.");
+  } else {
+    Serial.println("Kamerafeil!");
   }
 }
 
 void sendImage() {
+  if (!wifiEnabled) return; // Ikke prøv å sende hvis vi ikke har nett
+
   isUploading = true; 
-  
-  // Slå av motorer for å gi all strøm/fokus til WiFi
   analogWrite(MOTOR_VENSTRE, 0);
   analogWrite(MOTOR_MIDT, 0);
   analogWrite(MOTOR_HOYRE, 0);
@@ -86,7 +89,7 @@ void sendImage() {
   
   HTTPClient http;
   http.begin(serverUrl);
-  http.setTimeout(15000);
+  http.setTimeout(10000);
 
   String boundary = "boundary123";
   String head = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"photo.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n";
@@ -101,8 +104,7 @@ void sendImage() {
     memcpy(buf + head.length() + fb->len, tail.c_str(), tail.length());
 
     http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-    int res = http.POST(buf, totalLen);
-    Serial.printf("Opplasting ferdig, kode: %d\n", res);
+    http.POST(buf, totalLen);
     free(buf);
   }
 
@@ -117,16 +119,34 @@ void setup() {
   pinMode(MOTOR_VENSTRE, OUTPUT);
   pinMode(MOTOR_MIDT, OUTPUT);
   pinMode(MOTOR_HOYRE, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP); // Bruker intern pullup på pin 4
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+  // --- WIFI TIMEOUT (15 SEKUNDER) ---
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  unsigned long startAttemptTime = millis();
+  Serial.print("Kobler til WiFi...");
 
-  initCamera();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
 
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiEnabled = true;
+    Serial.println("\nWiFi tilkoblet!");
+    initCamera(); // Initialiser kamera kun hvis vi har nett (sparer strøm/ressurser)
+  } else {
+    wifiEnabled = false;
+    Serial.println("\nWiFi timeout - fortsetter kun med ToF.");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF); // Slå av WiFi helt for å spare strøm
+  }
+
+  // ToF Sensor Setup
   Wire.begin(15, 14);
   Wire.setClock(400000); 
   if (myImager.begin() == false) {
+    Serial.println("ToF feilet!");
     while (1) delay(1000);
   }
   myImager.setResolution(8 * 8);
@@ -139,7 +159,7 @@ void setup() {
 }
 
 void loop() {
-  // 1. ToF Prosessering (Pauses under bilde-sending)
+  // 1. ToF og Vibrasjon
   if (timerFlag && !isUploading) {
     timerFlag = false; 
 
@@ -164,11 +184,10 @@ void loop() {
     }
   }
 
-  // 2. Knappesjekk (Pin 4 er LOW når knappen trykkes)
-  if (digitalRead(BUTTON_PIN) == LOW && !isUploading) {
-    delay(100); // Litt lengre debounce for Pin 4
+  // 2. Knappesjekk (Kun aktiv hvis WiFi fungerer)
+  if (wifiEnabled && digitalRead(BUTTON_PIN) == LOW && !isUploading) {
+    delay(100); 
     if (digitalRead(BUTTON_PIN) == LOW) {
-      Serial.println("Knapp trykket - tar bilde...");
       sendImage();
     }
   }

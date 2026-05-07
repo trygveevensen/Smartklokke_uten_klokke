@@ -1,0 +1,150 @@
+#include <Wire.h>
+#include <SparkFun_VL53L5CX_Library.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+// --- WIFI INNSTILLINGER ---
+const char* ssid = "Trygves Pixel";     // Bytt ut med ditt SSID
+const char* password = "1234567.";      // Bytt ut med ditt passord
+
+// --- PIN DEFINISJONER ---
+const int MOTOR_VENSTRE = 3; 
+const int MOTOR_MIDT    = 2;  //bytta med venstre  
+const int MOTOR_HOYRE   = 4;
+const int POT_PIN       = 1; 
+
+// --- GLOBALE VARIABLER ---
+SparkFun_VL53L5CX myImager;
+VL53L5CX_ResultsData measurementData;
+WebServer server(80);
+
+int curV = 0, curM = 0, curH = 0;
+int cntV = 0, cntM = 0, cntH = 0;
+String matrixData = ""; 
+
+const int MIN_DIST = 300;
+const int MAX_DIST = 1000;
+
+hw_timer_t * timer = NULL;
+volatile bool timerFlag = false;
+
+void IRAM_ATTR onTimer() { timerFlag = true; }
+
+// --- HTML Dashboard ---
+void handleRoot() {
+  String html = "<html><head><meta charset='UTF-8'>";
+  html += "<style>";
+  html += "body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; width: 100vw; background: #000; color: white; overflow: hidden; }";
+  html += ".top-section { flex: 2; display: flex; justify-content: center; align-items: center; background: #111; padding: 20px; }";
+  html += ".bottom-section { flex: 1; display: flex; width: 100%; border-top: 2px solid #333; }";
+  html += ".grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; width: 70vh; height: 70vh; }";
+  html += ".cell { background: #222; border-radius: 2px; }";
+  html += ".col-zone { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; border-right: 1px solid #333; transition: background 0.1s; }";
+  html += ".pwm { font-size: 8vw; font-weight: bold; margin: 0; }";
+  html += ".label { font-size: 1.5vw; opacity: 0.6; text-transform: uppercase; margin-bottom: 5px; }";
+  html += ".count { font-size: 2vw; margin: 0; opacity: 0.8; color: #00ffcc; }";
+  html += "</style>";
+  html += "<script>";
+  html += "function setCol(id, v) { var g=255-v, r=v; document.getElementById(id).style.backgroundColor='rgb('+r+','+g+',40)'; }";
+  html += "setInterval(function() {";
+  html += "  fetch('/data').then(r => r.json()).then(d => {";
+  html += "    setCol('zv', d.pv); setCol('zm', d.pm); setCol('zh', d.ph);";
+  html += "    document.getElementById('pv').innerText = d.pv; document.getElementById('pm').innerText = d.pm; document.getElementById('ph').innerText = d.ph;";
+  html += "    document.getElementById('cv').innerText = d.cv; document.getElementById('cm').innerText = d.cm; document.getElementById('ch').innerText = d.ch;";
+  html += "    let m = d.mtx.split('');";
+  html += "    for(let i=0; i<64; i++) {";
+  html += "      let cell = document.getElementById('c'+i);";
+  html += "      let x = i % 8;"; 
+  html += "      if(m[i]=='1') {";
+  html += "        if(x<=1) cell.style.background='#44f'; else if(x>=6) cell.style.background='#f44'; else cell.style.background='#4f4';";
+  html += "      } else { cell.style.background='#222'; }";
+  html += "    }";
+  html += "  });";
+  html += "}, 100);";
+  html += "</script></head><body>";
+  
+  html += "<div class='top-section'><div class='grid'>";
+  for(int i=0; i<64; i++) html += "<div class='cell' id='c" + String(i) + "'></div>";
+  html += "</div></div>";
+  
+  html += "<div class='bottom-section'>";
+  html += "<div class='col-zone' id='zv'><div class='label'>Venstre</div><p class='count' id='cv'>0</p><p class='pwm' id='pv'>0</p></div>";
+  html += "<div class='col-zone' id='zm'><div class='label'>Midt</div><p class='count' id='cm'>0</p><p class='pwm' id='pm'>0</p></div>";
+  html += "<div class='col-zone' id='zh'><div class='label'>Høyre</div><p class='count' id='ch'>0</p><p class='pwm' id='ph'>0</p></div>";
+  html += "</div></body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleData() {
+  String json = "{\"cv\":" + String(cntV) + ",\"pv\":" + String(curV) + ",";
+  json += "\"cm\":" + String(cntM) + ",\"pm\":" + String(curM) + ",";
+  json += "\"ch\":" + String(cntH) + ",\"ph\":" + String(curH) + ",";
+  json += "\"mtx\":\"" + matrixData + "\"}";
+  server.send(200, "application/json", json);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(MOTOR_VENSTRE, OUTPUT);
+  pinMode(MOTOR_MIDT,    OUTPUT);
+  pinMode(MOTOR_HOYRE,   OUTPUT);
+
+  // --- Wi-Fi Tilkobling ---
+  WiFi.begin(ssid, password);
+  Serial.print("Kobler til WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nKoblet til!");
+  Serial.print("IP-adresse: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.begin();
+
+  Wire.begin(7, 6);
+  Wire.setClock(400000); 
+  if (myImager.begin() == false) {
+    Serial.println("Sensor ikke funnet!");
+    while (1) delay(1000);
+  }
+  
+  myImager.setResolution(8 * 8); 
+  myImager.setRangingFrequency(15);
+  myImager.startRanging();
+
+  timer = timerBegin(1000000); 
+  timerAttachInterrupt(timer, &onTimer);
+  timerAlarm(timer, 66667, true, 0); 
+}
+
+void loop() {
+  server.handleClient();
+  if (timerFlag) {
+    timerFlag = false; 
+    int potVal = analogRead(POT_PIN);
+    if (myImager.isDataReady() && myImager.getRangingData(&measurementData)) {
+      int cV = 0, cM = 0, cH = 0;
+      matrixData = "";
+      for (int i = 0; i < 64; i++) {
+        bool hit = (measurementData.target_status[i] == 5 || measurementData.target_status[i] == 9) && 
+                    measurementData.distance_mm[i] >= MIN_DIST && measurementData.distance_mm[i] <= MAX_DIST;
+        if (hit) {
+          matrixData += "1";
+          int x = i % 8; 
+          if (x <= 1) cV++; else if (x >= 6) cH++; else cM++; 
+        } else { matrixData += "0"; }
+      }
+      cntV = cV; cntM = cM; cntH = cH;
+      float sens = map(potVal, 0, 4095, 127, 16); 
+      curV = constrain(cV * (sens / 1.0), 0, 255);
+      curM = constrain(cM * (sens / 2.0), 0, 255); 
+      curH = constrain(cH * (sens / 1.0), 0, 255);
+      analogWrite(MOTOR_VENSTRE, curV);
+      analogWrite(MOTOR_MIDT,    curM);
+      analogWrite(MOTOR_HOYRE,   curH);
+    }
+  }
+}
